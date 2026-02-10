@@ -17,6 +17,10 @@ BROWSER_HEADERS = {
 }
 
 
+def log(msg):
+    print(f'[{datetime.now()}] {msg}', flush=True)
+
+
 class SessionExpiredError(Exception):
     pass
 
@@ -29,71 +33,112 @@ class DiningBalanceScraper:
 
     def _cookie_header(self):
         """Build a Cookie header string, same as Node.js version."""
-        return '; '.join(f'{k}={v}' for k, v in self.cookie_dict.items())
+        header = '; '.join(f'{k}={v}' for k, v in self.cookie_dict.items())
+        log(f'Cookie header length: {len(header)} chars, {len(self.cookie_dict)} cookies')
+        return header
 
     def load_cookies(self):
         """Load cookies from file, falling back to INITIAL_COOKIES env var."""
+        log(f'load_cookies() called')
+        log(f'  cookies.pkl exists: {os.path.exists(self.cookies_file)}')
+        log(f'  INITIAL_COOKIES env var set: {bool(os.environ.get("INITIAL_COOKIES"))}')
+
         # Try cookies.pkl first
         if os.path.exists(self.cookies_file):
             try:
                 with open(self.cookies_file, 'rb') as f:
                     self.cookie_dict = pickle.load(f)
-                print(f'[{datetime.now()}] Loaded {len(self.cookie_dict)} cookies from {self.cookies_file}')
+                log(f'Loaded {len(self.cookie_dict)} cookies from {self.cookies_file}')
+                for name in self.cookie_dict:
+                    log(f'  cookie: {name} = {str(self.cookie_dict[name])[:50]}...')
                 return
             except Exception as e:
-                print(f'[{datetime.now()}] Failed to load {self.cookies_file}: {e}')
+                log(f'Failed to load {self.cookies_file}: {e}')
 
         # Fallback to INITIAL_COOKIES env var (base64 encoded JSON)
         env_cookies = os.environ.get('INITIAL_COOKIES')
         if env_cookies:
+            log(f'INITIAL_COOKIES length: {len(env_cookies)} chars')
             try:
-                cookie_data = json.loads(base64.b64decode(env_cookies))
-                # Support Playwright storageState format
+                decoded = base64.b64decode(env_cookies)
+                log(f'Base64 decoded length: {len(decoded)} bytes')
+                cookie_data = json.loads(decoded)
+                log(f'JSON parsed, type: {type(cookie_data).__name__}')
+
                 if isinstance(cookie_data, dict) and 'cookies' in cookie_data:
+                    log(f'Playwright storageState format, {len(cookie_data["cookies"])} total cookies')
                     for c in cookie_data['cookies']:
-                        if 'eacct-buzzcard-sp.transactcampus.com' in c.get('domain', ''):
+                        domain = c.get('domain', '')
+                        log(f'  cookie domain={domain} name={c.get("name", "?")}')
+                        if 'eacct-buzzcard-sp.transactcampus.com' in domain:
                             self.cookie_dict[c['name']] = c['value']
+                            log(f'    -> KEPT')
+                        else:
+                            log(f'    -> SKIPPED (wrong domain)')
                 elif isinstance(cookie_data, dict):
+                    log(f'Plain dict format with {len(cookie_data)} keys')
                     self.cookie_dict = cookie_data
+
+                log(f'Final cookie_dict has {len(self.cookie_dict)} cookies:')
+                for name in self.cookie_dict:
+                    log(f'  {name} = {str(self.cookie_dict[name])[:50]}...')
+
                 self.save_cookies()
-                print(f'[{datetime.now()}] Loaded {len(self.cookie_dict)} cookies from INITIAL_COOKIES env var')
+                log(f'Loaded {len(self.cookie_dict)} cookies from INITIAL_COOKIES env var')
                 return
             except Exception as e:
-                print(f'[{datetime.now()}] Failed to parse INITIAL_COOKIES: {e}')
+                log(f'Failed to parse INITIAL_COOKIES: {e}')
+                import traceback
+                traceback.print_exc()
 
-        print(f'[{datetime.now()}] No cookies found')
+        log(f'No cookies found!')
 
     def save_cookies(self):
         """Save current cookies to file."""
         with open(self.cookies_file, 'wb') as f:
             pickle.dump(self.cookie_dict, f)
-        print(f'[{datetime.now()}] Saved {len(self.cookie_dict)} cookies to {self.cookies_file}')
+        log(f'Saved {len(self.cookie_dict)} cookies to {self.cookies_file}')
 
     def _update_cookies_from_response(self, response):
         """Update cookie dict from Set-Cookie response headers."""
-        for cookie in response.cookies:
-            self.cookie_dict[cookie.name] = cookie.value
+        new_cookies = list(response.cookies)
+        if new_cookies:
+            log(f'Response Set-Cookie headers: {len(new_cookies)} cookies')
+            for cookie in new_cookies:
+                log(f'  Set-Cookie: {cookie.name} = {str(cookie.value)[:50]}...')
+                self.cookie_dict[cookie.name] = cookie.value
+        else:
+            log(f'No Set-Cookie headers in response')
 
     def _fetch_page(self, url):
         """GET a page with manual Cookie header."""
-        print(f'[{datetime.now()}] GET {url}')
+        log(f'GET {url}')
         response = requests.get(
             url,
             headers={**BROWSER_HEADERS, 'Cookie': self._cookie_header()},
             timeout=30,
             allow_redirects=False,
         )
-        print(f'[{datetime.now()}] Response: {response.status_code}')
+        log(f'GET Response: {response.status_code}, body length: {len(response.text)} chars')
+        log(f'GET Response headers: {dict(response.headers)}')
 
         if response.status_code == 302:
             location = response.headers.get('Location', '')
-            print(f'[{datetime.now()}] Redirect to: {location}')
+            log(f'GET Redirect to: {location}')
             if 'login' in location.lower() or 'cas' in location.lower() or 'sso' in location.lower():
                 raise SessionExpiredError('Session expired')
             raise Exception(f'Redirected to: {location}')
 
         if response.status_code != 200:
+            log(f'GET Unexpected status! Body preview: {response.text[:500]}')
             raise Exception(f'Unexpected status: {response.status_code}')
+
+        # Log a snippet of the HTML to confirm we got the right page
+        title_match = re.search(r'<title>(.*?)</title>', response.text, re.IGNORECASE)
+        if title_match:
+            log(f'Page title: {title_match.group(1)}')
+        else:
+            log(f'No <title> found, body preview: {response.text[:200]}')
 
         self._update_cookies_from_response(response)
         self.save_cookies()
@@ -101,7 +146,13 @@ class DiningBalanceScraper:
 
     def _ajax_post(self, url, form_data):
         """POST an ASP.NET AJAX async postback with manual Cookie header."""
-        print(f'[{datetime.now()}] POST {url}')
+        log(f'POST {url}')
+        log(f'POST form_data keys: {list(form_data.keys())}')
+        log(f'POST __EVENTTARGET: {form_data.get("__EVENTTARGET", "?")}')
+        log(f'POST RadScriptManager1: {form_data.get("ctl00$RadScriptManager1", "?")}')
+        log(f'POST __VIEWSTATE length: {len(form_data.get("__VIEWSTATE", ""))}')
+        log(f'POST __EVENTVALIDATION length: {len(form_data.get("__EVENTVALIDATION", ""))}')
+
         response = requests.post(
             url,
             data=form_data,
@@ -115,17 +166,21 @@ class DiningBalanceScraper:
             timeout=30,
             allow_redirects=False,
         )
-        print(f'[{datetime.now()}] POST Response: {response.status_code}')
+        log(f'POST Response: {response.status_code}, body length: {len(response.text)} chars')
+        log(f'POST Response headers: {dict(response.headers)}')
 
         if response.status_code == 302:
             location = response.headers.get('Location', '')
-            print(f'[{datetime.now()}] POST Redirect to: {location}')
+            log(f'POST Redirect to: {location}')
             raise SessionExpiredError('Session expired during POST')
 
         text = response.text
         if 'pageRedirect' in text:
-            print(f'[{datetime.now()}] pageRedirect detected in response')
+            log(f'pageRedirect detected! Response preview: {text[:500]}')
             raise SessionExpiredError('Session expired (server redirected)')
+
+        # Log delta response summary
+        log(f'POST response preview: {text[:300]}')
 
         self._update_cookies_from_response(response)
         self.save_cookies()
@@ -162,6 +217,10 @@ class DiningBalanceScraper:
             pos = pos + length + 1
 
             parts.append({'type': part_type, 'id': part_id, 'content': content})
+
+        log(f'Parsed {len(parts)} delta parts:')
+        for p in parts:
+            log(f'  type={p["type"]} id={p["id"]} content_length={len(p["content"])}')
         return parts
 
     @staticmethod
@@ -173,6 +232,7 @@ class DiningBalanceScraper:
             value = inp.get('value', '')
             if name:
                 fields[name] = value
+        log(f'Extracted {len(fields)} hidden fields')
         return fields
 
     @staticmethod
@@ -225,16 +285,21 @@ class DiningBalanceScraper:
                     'type': row[4],
                     'amount': row[5],
                 })
+        log(f'Parsed {len(transactions)} transaction rows from HTML')
         return transactions
 
     def get_balance(self):
         """Fetch account balances from the Account Summary page."""
+        log('=== get_balance() START ===')
         try:
             html = self._fetch_page(f'{BASE_URL}/AccountSummary.aspx')
             soup = BeautifulSoup(html, 'html.parser')
 
             accounts = []
-            for el in soup.select('.account'):
+            account_els = soup.select('.account')
+            log(f'Found {len(account_els)} .account elements')
+
+            for el in account_els:
                 name_el = el.select_one('.accountName')
                 balance_el = el.select_one('.accountBalance span')
                 status_el = el.select_one('.accountStatus')
@@ -242,10 +307,15 @@ class DiningBalanceScraper:
                 name = name_el.get_text(strip=True) if name_el else ''
 
                 if balance_el:
-                    accounts.append({'name': name, 'balance': balance_el.get_text(strip=True)})
+                    balance = balance_el.get_text(strip=True)
+                    log(f'  Account: {name} = {balance}')
+                    accounts.append({'name': name, 'balance': balance})
                 elif status_el:
-                    accounts.append({'name': name, 'balance': status_el.get_text(strip=True)})
+                    status = status_el.get_text(strip=True)
+                    log(f'  Account: {name} = {status}')
+                    accounts.append({'name': name, 'balance': status})
 
+            log(f'=== get_balance() SUCCESS: {len(accounts)} accounts ===')
             return {
                 'accounts': accounts,
                 'timestamp': datetime.now().isoformat(),
@@ -253,12 +323,17 @@ class DiningBalanceScraper:
             }
 
         except SessionExpiredError:
+            log('=== get_balance() FAILED: session expired ===')
             return {'error': 'session_expired'}
         except Exception as e:
+            log(f'=== get_balance() FAILED: {e} ===')
+            import traceback
+            traceback.print_exc()
             return {'error': str(e)}
 
     def get_transactions(self, begin_date=None, end_date=None):
         """Fetch transaction history. Dates in 'M/D/YYYY h:mm AM' format, or None for defaults."""
+        log(f'=== get_transactions() START (begin={begin_date}, end={end_date}) ===')
         try:
             html = self._fetch_page(f'{BASE_URL}/AccountTransaction.aspx')
             soup = BeautifulSoup(html, 'html.parser')
@@ -269,16 +344,19 @@ class DiningBalanceScraper:
             account_select = soup.find('select', id='MainContent_Accounts')
             account_val = account_select.find('option', selected=True) if account_select else None
             account_val = account_val['value'] if account_val else 'eabaee3a-1e38-448b-9470-4ffd85e666ce'
+            log(f'Account dropdown value: {account_val}')
 
             trans_select = soup.find('select', id='MainContent_TransactionType')
             trans_val = trans_select.find('option', selected=True) if trans_select else None
             trans_val = trans_val['value'] if trans_val else 'eabaee3a-1e38-448b-9470-4ffd85e666ce'
+            log(f'Transaction type dropdown value: {trans_val}')
 
             # Resolve dates
             begin_input = soup.find('input', {'name': 'ctl00$MainContent$BeginRadDateTimePicker$dateInput'})
             end_input = soup.find('input', {'name': 'ctl00$MainContent$EndRadDateTimePicker$dateInput'})
             begin_display = begin_date or (begin_input.get('value', '') if begin_input else '')
             end_display = end_date or (end_input.get('value', '') if end_input else '')
+            log(f'Date range: {begin_display} -> {end_display}')
 
             use_custom = begin_date and end_date
             if use_custom:
@@ -286,11 +364,13 @@ class DiningBalanceScraper:
                 end_telerik = self._to_telerik_date(end_date)
                 begin_cs = self._to_client_state(begin_date)
                 end_cs = self._to_client_state(end_date)
+                log(f'Using custom dates: {begin_telerik} -> {end_telerik}')
             else:
                 begin_telerik = hidden.get('ctl00_MainContent_BeginRadDateTimePicker', '')
                 end_telerik = hidden.get('ctl00_MainContent_EndRadDateTimePicker', '')
                 begin_cs = hidden.get('ctl00_MainContent_BeginRadDateTimePicker_dateInput_ClientState', '')
                 end_cs = hidden.get('ctl00_MainContent_EndRadDateTimePicker_dateInput_ClientState', '')
+                log(f'Using default dates from page: {begin_telerik} -> {end_telerik}')
 
             form_data = {
                 'RadScriptManager1_TSM': hidden.get('RadScriptManager1_TSM', ''),
@@ -330,14 +410,18 @@ class DiningBalanceScraper:
             ncform = hidden.get('__ncforminfo')
             if ncform:
                 form_data['__ncforminfo'] = ncform
+                log(f'__ncforminfo included, length: {len(ncform)}')
 
             # Page 1
+            log('Submitting search (page 1)...')
             delta_parts = self._ajax_post(f'{BASE_URL}/AccountTransaction.aspx', form_data)
             all_transactions = []
 
             for part in delta_parts:
                 if part['type'] == 'updatePanel' and '<tr' in part['content']:
                     all_transactions.extend(self._parse_transaction_rows(part['content']))
+
+            log(f'Page 1: {len(all_transactions)} transactions')
 
             # Pagination
             page_num = 2
@@ -348,6 +432,7 @@ class DiningBalanceScraper:
                         result_html = part['content']
 
                 if not result_html:
+                    log(f'No ResultRadGrid panel found, stopping pagination')
                     break
 
                 page_soup = BeautifulSoup(result_html, 'html.parser')
@@ -360,8 +445,10 @@ class DiningBalanceScraper:
                             break
 
                 if not next_target:
+                    log(f'No page {page_num} link found, stopping pagination')
                     break
 
+                log(f'Fetching page {page_num} (target: {next_target})...')
                 updated = self._extract_delta_hidden_fields(delta_parts)
                 page_form = dict(form_data)
                 page_form['__VIEWSTATE'] = updated.get('__VIEWSTATE', form_data['__VIEWSTATE'])
@@ -382,11 +469,14 @@ class DiningBalanceScraper:
                         page_transactions.extend(self._parse_transaction_rows(part['content']))
 
                 if not page_transactions:
+                    log(f'Page {page_num} returned 0 transactions, stopping')
                     break
 
+                log(f'Page {page_num}: {len(page_transactions)} transactions')
                 all_transactions.extend(page_transactions)
                 page_num += 1
 
+            log(f'=== get_transactions() SUCCESS: {len(all_transactions)} total ===')
             return {
                 'transactions': all_transactions,
                 'count': len(all_transactions),
@@ -397,8 +487,12 @@ class DiningBalanceScraper:
             }
 
         except SessionExpiredError:
+            log('=== get_transactions() FAILED: session expired ===')
             return {'error': 'session_expired'}
         except Exception as e:
+            log(f'=== get_transactions() FAILED: {e} ===')
+            import traceback
+            traceback.print_exc()
             return {'error': str(e)}
 
 

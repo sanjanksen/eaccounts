@@ -1,4 +1,8 @@
 cookies.pkl
+session.json
 __pycache__/
 *.pyc
 .env
+save-session.js
+setup-cookies.py
+test-api.py

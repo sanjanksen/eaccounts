@@ -6,7 +6,6 @@ import json
 import base64
 from datetime import datetime
 from bs4 import BeautifulSoup
-from urllib.parse import urlencode
 
 BASE_URL = 'https://eacct-buzzcard-sp.transactcampus.com/buzzcard'
 
@@ -14,7 +13,6 @@ BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
 }
 
@@ -25,10 +23,13 @@ class SessionExpiredError(Exception):
 
 class DiningBalanceScraper:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(BROWSER_HEADERS)
         self.cookies_file = 'cookies.pkl'
+        self.cookie_dict = {}  # plain {name: value} dict
         self.load_cookies()
+
+    def _cookie_header(self):
+        """Build a Cookie header string, same as Node.js version."""
+        return '; '.join(f'{k}={v}' for k, v in self.cookie_dict.items())
 
     def load_cookies(self):
         """Load cookies from file, falling back to INITIAL_COOKIES env var."""
@@ -36,10 +37,8 @@ class DiningBalanceScraper:
         if os.path.exists(self.cookies_file):
             try:
                 with open(self.cookies_file, 'rb') as f:
-                    cookies = pickle.load(f)
-                for name, value in cookies.items():
-                    self.session.cookies.set(name, value)
-                print(f'[{datetime.now()}] Loaded cookies from {self.cookies_file}')
+                    self.cookie_dict = pickle.load(f)
+                print(f'[{datetime.now()}] Loaded {len(self.cookie_dict)} cookies from {self.cookies_file}')
                 return
             except Exception as e:
                 print(f'[{datetime.now()}] Failed to load {self.cookies_file}: {e}')
@@ -49,18 +48,15 @@ class DiningBalanceScraper:
         if env_cookies:
             try:
                 cookie_data = json.loads(base64.b64decode(env_cookies))
-                # Support both formats: plain dict or Playwright storageState
+                # Support Playwright storageState format
                 if isinstance(cookie_data, dict) and 'cookies' in cookie_data:
-                    # Playwright storageState format
                     for c in cookie_data['cookies']:
                         if 'eacct-buzzcard-sp.transactcampus.com' in c.get('domain', ''):
-                            self.session.cookies.set(c['name'], c['value'])
+                            self.cookie_dict[c['name']] = c['value']
                 elif isinstance(cookie_data, dict):
-                    # Plain {name: value} dict
-                    for name, value in cookie_data.items():
-                        self.session.cookies.set(name, value)
+                    self.cookie_dict = cookie_data
                 self.save_cookies()
-                print(f'[{datetime.now()}] Loaded cookies from INITIAL_COOKIES env var')
+                print(f'[{datetime.now()}] Loaded {len(self.cookie_dict)} cookies from INITIAL_COOKIES env var')
                 return
             except Exception as e:
                 print(f'[{datetime.now()}] Failed to parse INITIAL_COOKIES: {e}')
@@ -68,18 +64,25 @@ class DiningBalanceScraper:
         print(f'[{datetime.now()}] No cookies found')
 
     def save_cookies(self):
-        """Save current session cookies to file."""
-        cookies = {}
-        for cookie in self.session.cookies:
-            cookies[cookie.name] = cookie.value
+        """Save current cookies to file."""
         with open(self.cookies_file, 'wb') as f:
-            pickle.dump(cookies, f)
-        print(f'[{datetime.now()}] Saved cookies to {self.cookies_file}')
+            pickle.dump(self.cookie_dict, f)
+        print(f'[{datetime.now()}] Saved {len(self.cookie_dict)} cookies to {self.cookies_file}')
+
+    def _update_cookies_from_response(self, response):
+        """Update cookie dict from Set-Cookie response headers."""
+        for cookie in response.cookies:
+            self.cookie_dict[cookie.name] = cookie.value
 
     def _fetch_page(self, url):
-        """GET a page and check for session expiry."""
+        """GET a page with manual Cookie header."""
         print(f'[{datetime.now()}] GET {url}')
-        response = self.session.get(url, timeout=15, allow_redirects=False)
+        response = requests.get(
+            url,
+            headers={**BROWSER_HEADERS, 'Cookie': self._cookie_header()},
+            timeout=15,
+            allow_redirects=False,
+        )
         print(f'[{datetime.now()}] Response: {response.status_code}')
 
         if response.status_code == 302:
@@ -92,16 +95,19 @@ class DiningBalanceScraper:
         if response.status_code != 200:
             raise Exception(f'Unexpected status: {response.status_code}')
 
+        self._update_cookies_from_response(response)
         self.save_cookies()
         return response.text
 
     def _ajax_post(self, url, form_data):
-        """POST an ASP.NET AJAX async postback."""
+        """POST an ASP.NET AJAX async postback with manual Cookie header."""
         print(f'[{datetime.now()}] POST {url}')
-        response = self.session.post(
+        response = requests.post(
             url,
             data=form_data,
             headers={
+                **BROWSER_HEADERS,
+                'Cookie': self._cookie_header(),
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'X-MicrosoftAjax': 'Delta=true',
                 'X-Requested-With': 'XMLHttpRequest',
@@ -121,6 +127,7 @@ class DiningBalanceScraper:
             print(f'[{datetime.now()}] pageRedirect detected in response')
             raise SessionExpiredError('Session expired (server redirected)')
 
+        self._update_cookies_from_response(response)
         self.save_cookies()
         return self._parse_delta_response(text)
 
@@ -210,7 +217,6 @@ class DiningBalanceScraper:
 
             row = [cell.get_text(strip=True) for cell in cells]
 
-            # Only include rows that have a date pattern in the first cell
             if row[0] and re.match(r'^\d{1,2}/\d{1,2}/\d{4}', row[0]):
                 transactions.append({
                     'date': row[0],

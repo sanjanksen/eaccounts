@@ -1,6 +1,8 @@
 import os
+import pickle
 from flask import Flask, jsonify, request
 from scraper import DiningBalanceScraper
+from login import perform_login, LoginError
 
 app = Flask(__name__)
 
@@ -34,6 +36,38 @@ def get_transactions():
         return jsonify(result), 500
 
     return jsonify(result)
+
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    username = os.environ.get('GT_USERNAME', '')
+    password = os.environ.get('GT_PASSWORD', '')
+
+    if not username or not password:
+        return jsonify({'error': 'GT_USERNAME and GT_PASSWORD env vars must be set'}), 400
+
+    try:
+        cookies = perform_login(username, password)
+
+        if not cookies:
+            return jsonify({'error': 'Login completed but no cookies were returned'}), 500
+
+        # Save cookies to cookies.pkl (same format the scraper expects)
+        with open('cookies.pkl', 'wb') as f:
+            pickle.dump(cookies, f)
+
+        return jsonify({
+            'status': 'success',
+            'message': f'Login successful — {len(cookies)} cookies saved',
+            'cookies_count': len(cookies),
+        })
+
+    except LoginError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Login failed: {str(e)}'}), 500
 
 
 @app.route('/api/health', methods=['GET'])

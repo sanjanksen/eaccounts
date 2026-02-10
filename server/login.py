@@ -545,13 +545,16 @@ def _do_duo_universal(session, duo_info):
 
     log(f'Found sid from URL: {sid[:20]}...')
 
-    # Extract xsrf token from cookie
+    # Extract xsrf token from cookie — strip quotes if present
     xsrf_token = None
     for cookie in session.cookies:
-        if cookie.name.startswith('_xsrf|'):
-            xsrf_token = cookie.value
+        if cookie.name.startswith('_xsrf'):
+            xsrf_token = cookie.value.strip('"')
             log(f'Found xsrf token from cookie: {xsrf_token[:30]}...')
             break
+
+    # Also log the full Duo page HTML so we can see what endpoints it uses
+    log(f'Duo page full HTML: {html}')
 
     return _poll_duo_push(session, parsed.netloc, sid, xsrf_token)
 
@@ -570,27 +573,34 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
     if xsrf_token:
         api_headers['X-Xsrftoken'] = xsrf_token
 
-    # Trigger push
-    prompt_url = f'https://{duo_host}/frame/prompt'
+    log(f'Duo API headers: { {k: v[:50] if len(v) > 50 else v for k,v in api_headers.items()} }')
+    log(f'Duo session cookies: {[f"{c.name}={c.value[:30]}..." for c in session.cookies if "duo" in c.domain or "xsrf" in c.name.lower()]}')
+
+    # Trigger push — try v4 path first, fall back to legacy
+    prompt_url = f'https://{duo_host}/frame/v4/prompt'
     log(f'Triggering Duo Push via {prompt_url}...')
 
-    resp = session.post(
-        prompt_url,
-        data={
-            'sid': sid,
-            'factor': 'Duo Push',
-            'device': 'phone1',
-            'postAuthDestination': 'OIDC_EXIT',
-            'out_of_date': '',
-            'days_out_of_date': '',
-            'days_to_block': 'None',
-        },
-        headers=api_headers,
-        timeout=30,
-    )
+    prompt_data = {
+        'sid': sid,
+        'factor': 'Duo Push',
+        'device': 'phone1',
+        'postAuthDestination': 'OIDC_EXIT',
+        'out_of_date': '',
+        'days_out_of_date': '',
+        'days_to_block': 'None',
+    }
 
-    log(f'Duo prompt response status: {resp.status_code}')
-    log(f'Duo prompt response body: {resp.text[:500]}')
+    resp = session.post(prompt_url, data=prompt_data, headers=api_headers, timeout=30)
+    log(f'Duo v4 prompt response status: {resp.status_code}')
+    log(f'Duo v4 prompt response body: {resp.text[:500]}')
+
+    # If v4 path fails, try legacy /frame/prompt
+    if resp.status_code == 403 or resp.status_code == 404:
+        prompt_url = f'https://{duo_host}/frame/prompt'
+        log(f'v4 path failed, trying legacy: {prompt_url}')
+        resp = session.post(prompt_url, data=prompt_data, headers=api_headers, timeout=30)
+        log(f'Duo legacy prompt response status: {resp.status_code}')
+        log(f'Duo legacy prompt response body: {resp.text[:500]}')
 
     try:
         prompt_result = resp.json()
@@ -606,8 +616,11 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
     log(f'Duo txid: {txid}')
     log('Waiting for Duo push approval (check your phone)...')
 
-    # Poll
-    status_url = f'https://{duo_host}/frame/status'
+    # Poll — use same path prefix as prompt (v4 or legacy)
+    if '/v4/' in prompt_url:
+        status_url = f'https://{duo_host}/frame/v4/status'
+    else:
+        status_url = f'https://{duo_host}/frame/status'
     start_time = time.time()
 
     while time.time() - start_time < DUO_POLL_TIMEOUT:

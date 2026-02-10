@@ -522,16 +522,52 @@ def _do_duo_universal(session, duo_info):
         )
         log(f'Preauth response: {resp.status_code}, url: {resp.url}')
         log(f'Preauth body length: {len(resp.text)}')
-        log(f'Preauth body preview: {resp.text[:1000]}')
 
-        # After preauth, we should get the prompt page with device options.
-        # The sid might have changed — extract from new URL or response.
+        # After preauth, we land on the healthcheck page with a React app.
+        # Parse the base-data JSON embedded in the page — it has device info.
+        import json as json_mod
+        preauth_soup = BeautifulSoup(resp.text, 'html.parser')
+        base_data_el = preauth_soup.find('script', id='base-data')
+        if base_data_el and base_data_el.string:
+            try:
+                base_data = json_mod.loads(base_data_el.string)
+                log(f'base-data keys: {list(base_data.keys())}')
+                log(f'base-data: {json_mod.dumps(base_data, indent=2)[:2000]}')
+            except Exception as e:
+                log(f'Failed to parse base-data: {e}')
+                base_data = {}
+        else:
+            log('No base-data found in preauth response')
+            base_data = {}
+
+        # Extract sid from new URL
         new_parsed = urlparse(resp.url)
         new_sid = parse_qs(new_parsed.query).get('sid', [None])
         if new_sid and new_sid[0]:
             sid = new_sid[0]
         else:
             sid = parse_qs(parsed.query).get('sid', [None])[0]
+
+        # Get fresh xsrf token from cookies AFTER preauth
+        xsrf_token = None
+        for cookie in session.cookies:
+            if cookie.name.startswith('_xsrf'):
+                # Cookie value is base64-encoded; we need the raw token
+                import base64
+                try:
+                    raw = cookie.value.strip('"')
+                    # Try base64 decode — the raw hex token is what we need for the header
+                    decoded = base64.b64decode(raw).decode('utf-8')
+                    # The decoded value might have a timestamp appended with |
+                    if '|' in decoded:
+                        xsrf_token = decoded.split('|')[0]
+                    else:
+                        xsrf_token = decoded
+                    log(f'xsrf from cookie (decoded): {xsrf_token}')
+                except Exception:
+                    xsrf_token = raw
+                    log(f'xsrf from cookie (raw): {xsrf_token[:40]}...')
+                break
 
         log(f'Using sid: {sid[:30]}...')
     else:
@@ -557,7 +593,7 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
         'Accept': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
         'Origin': f'https://{duo_host}',
-        'Referer': f'https://{duo_host}/frame/frameless/v4/auth',
+        'Referer': f'https://{duo_host}/frame/v4/preauth/healthcheck?sid={sid}',
     }
     if xsrf_token:
         api_headers['X-Xsrftoken'] = xsrf_token

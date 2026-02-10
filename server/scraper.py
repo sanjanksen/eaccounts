@@ -78,10 +78,13 @@ class DiningBalanceScraper:
 
     def _fetch_page(self, url):
         """GET a page and check for session expiry."""
+        print(f'[{datetime.now()}] GET {url}')
         response = self.session.get(url, timeout=15, allow_redirects=False)
+        print(f'[{datetime.now()}] Response: {response.status_code}')
 
         if response.status_code == 302:
             location = response.headers.get('Location', '')
+            print(f'[{datetime.now()}] Redirect to: {location}')
             if 'login' in location.lower() or 'cas' in location.lower() or 'sso' in location.lower():
                 raise SessionExpiredError('Session expired')
             raise Exception(f'Redirected to: {location}')
@@ -94,6 +97,7 @@ class DiningBalanceScraper:
 
     def _ajax_post(self, url, form_data):
         """POST an ASP.NET AJAX async postback."""
+        print(f'[{datetime.now()}] POST {url}')
         response = self.session.post(
             url,
             data=form_data,
@@ -105,12 +109,16 @@ class DiningBalanceScraper:
             timeout=30,
             allow_redirects=False,
         )
+        print(f'[{datetime.now()}] POST Response: {response.status_code}')
 
         if response.status_code == 302:
+            location = response.headers.get('Location', '')
+            print(f'[{datetime.now()}] POST Redirect to: {location}')
             raise SessionExpiredError('Session expired during POST')
 
         text = response.text
         if 'pageRedirect' in text:
+            print(f'[{datetime.now()}] pageRedirect detected in response')
             raise SessionExpiredError('Session expired (server redirected)')
 
         self.save_cookies()

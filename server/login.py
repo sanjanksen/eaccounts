@@ -87,43 +87,35 @@ def perform_login(username, password):
     on_cas = 'cas' in url.lower() or 'login' in url.lower() or 'sso' in url.lower()
     on_eaccounts = 'transactcampus.com' in url
 
-    if on_eaccounts:
+    # Check for SAML auto-submit form (SP-initiated SSO).
+    # eAccounts returns a 200 with a form that POSTs SAMLRequest to GT IdP.
+    # A browser would auto-submit via onload, but we need to do it manually.
+    saml_request_form = _find_saml_request_form(resp.text)
+    if saml_request_form:
+        log(f'Found SAML AuthnRequest form -> {saml_request_form["action"]}')
+        resp = session.post(
+            saml_request_form['action'],
+            data=saml_request_form['fields'],
+            allow_redirects=True,
+            timeout=30,
+        )
+        url = resp.url
+        log(f'After SAML AuthnRequest POST: {url}')
+        log(f'Status: {resp.status_code}, body length: {len(resp.text)}')
+        log(f'Page title: {_get_title(resp.text)}')
+        on_cas = 'cas' in url.lower() or 'login' in url.lower() or 'sso' in url.lower() or 'idp' in url.lower()
+
+    if on_eaccounts and not saml_request_form:
         # Check if the page actually has account data (real session) vs a stub
         soup_check = BeautifulSoup(resp.text, 'html.parser')
         has_accounts = bool(soup_check.select('.account'))
-        has_login_link = bool(soup_check.find('a', href=re.compile(r'cas|sso|login', re.I)))
-        # Also check for Shibboleth/SAML login link
-        shib_link = soup_check.find('a', href=re.compile(r'Shibboleth|SSO|Login', re.I))
-        log(f'On eAccounts: has_accounts={has_accounts}, has_login_link={has_login_link}, shib_link={bool(shib_link)}')
+        log(f'On eAccounts: has_accounts={has_accounts}')
 
         if has_accounts and len(resp.text) > 5000:
             log('Already logged in — session is still valid')
             return _extract_eaccounts_cookies(session)
 
-        # Not really logged in — find the SSO login link
-        login_link = None
-        for a in soup_check.find_all('a', href=True):
-            href = a['href']
-            if any(kw in href.lower() for kw in ['shibboleth', 'sso', 'cas', 'login', 'saml']):
-                login_link = href
-                break
-
-        if login_link:
-            if not login_link.startswith('http'):
-                parsed = urlparse(url)
-                login_link = f'{parsed.scheme}://{parsed.netloc}{login_link}'
-            log(f'Found SSO login link: {login_link}')
-            # Follow the login link to get to CAS
-            resp = session.get(login_link, allow_redirects=True, timeout=30)
-            log(f'After following login link: {resp.url}')
-            log(f'Status: {resp.status_code}, body length: {len(resp.text)}')
-            url = resp.url
-            on_cas = 'cas' in url.lower() or 'login' in url.lower() or 'sso' in url.lower()
-        else:
-            # Dump all links for debugging
-            all_links = [a['href'] for a in soup_check.find_all('a', href=True)]
-            log(f'All links on page: {all_links}')
-            raise LoginError(f'eAccounts returned stub page but no SSO login link found')
+        raise LoginError(f'eAccounts returned unexpected page (no SAML form, no accounts)')
 
     if not on_cas:
         log(f'Not on CAS. Current URL: {url}')
@@ -752,6 +744,27 @@ def _follow_post_duo_redirects(session, resp):
                          'The redirect chain may have failed.')
 
     return _extract_eaccounts_cookies(session)
+
+
+def _find_saml_request_form(html):
+    """Find a SAML AuthnRequest auto-submit form (SP -> IdP)."""
+    soup = BeautifulSoup(html, 'html.parser')
+    saml_input = soup.find('input', {'name': 'SAMLRequest'})
+    if not saml_input:
+        return None
+
+    form = saml_input.find_parent('form')
+    if not form:
+        return None
+
+    action = form.get('action', '')
+    fields = {}
+    for inp in form.find_all('input'):
+        name = inp.get('name')
+        if name:
+            fields[name] = inp.get('value', '')
+
+    return {'action': action, 'fields': fields}
 
 
 def _find_saml_form(html):

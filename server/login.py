@@ -565,8 +565,8 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
     log(f'Duo API headers: { {k: v[:50] if len(v) > 50 else v for k,v in api_headers.items()} }')
     log(f'Duo session cookies: {[f"{c.name}={c.value[:30]}..." for c in session.cookies if "duo" in c.domain or "xsrf" in c.name.lower()]}')
 
-    # Trigger push — try v4 path first, fall back to legacy
-    prompt_url = f'https://{duo_host}/frame/v4/prompt'
+    # Trigger push — use /frame/prompt (what Duo's own page references)
+    prompt_url = f'https://{duo_host}/frame/prompt'
     log(f'Triggering Duo Push via {prompt_url}...')
 
     prompt_data = {
@@ -580,16 +580,8 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
     }
 
     resp = session.post(prompt_url, data=prompt_data, headers=api_headers, timeout=30)
-    log(f'Duo v4 prompt response status: {resp.status_code}')
-    log(f'Duo v4 prompt response body: {resp.text[:500]}')
-
-    # If v4 path fails, try legacy /frame/prompt
-    if resp.status_code == 403 or resp.status_code == 404:
-        prompt_url = f'https://{duo_host}/frame/prompt'
-        log(f'v4 path failed, trying legacy: {prompt_url}')
-        resp = session.post(prompt_url, data=prompt_data, headers=api_headers, timeout=30)
-        log(f'Duo legacy prompt response status: {resp.status_code}')
-        log(f'Duo legacy prompt response body: {resp.text[:500]}')
+    log(f'Duo prompt response status: {resp.status_code}')
+    log(f'Duo prompt response body: {resp.text[:500]}')
 
     try:
         prompt_result = resp.json()
@@ -605,11 +597,8 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
     log(f'Duo txid: {txid}')
     log('Waiting for Duo push approval (check your phone)...')
 
-    # Poll — use same path prefix as prompt (v4 or legacy)
-    if '/v4/' in prompt_url:
-        status_url = f'https://{duo_host}/frame/v4/status'
-    else:
-        status_url = f'https://{duo_host}/frame/status'
+    # Poll
+    status_url = f'https://{duo_host}/frame/status'
     start_time = time.time()
 
     while time.time() - start_time < DUO_POLL_TIMEOUT:

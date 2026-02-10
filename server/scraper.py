@@ -80,7 +80,7 @@ class DiningBalanceScraper:
         response = requests.get(
             url,
             headers={**BROWSER_HEADERS, 'Cookie': self._cookie_header()},
-            timeout=15,
+            timeout=30,
             allow_redirects=False,
         )
         print(f'[{datetime.now()}] Response: {response.status_code}')

@@ -533,24 +533,43 @@ def _do_duo_universal(session, duo_info):
         if parsed.fragment:
             sid = parse_qs(parsed.fragment).get('sid', [None])[0]
 
-    if sid:
-        log(f'Found sid from URL: {sid[:20]}...')
-        # Use the same prompt/status flow as iframe
-        return _poll_duo_push(session, parsed.netloc, sid)
+    if not sid:
+        # Try fragment
+        m = re.search(r'"sid"\s*:\s*"([^"]+)"', html)
+        if m:
+            sid = m.group(1)
 
-    # If we can't find sid, try to extract it from the page content
-    m = re.search(r'"sid"\s*:\s*"([^"]+)"', html)
-    if m:
-        sid = m.group(1)
-        log(f'Found sid from page content: {sid[:20]}...')
-        return _poll_duo_push(session, parsed.netloc, sid)
+    if not sid:
+        log(f'Universal Prompt page HTML preview: {html[:2000]}')
+        raise LoginError('Could not extract session ID from Duo Universal Prompt')
 
-    log(f'Universal Prompt page HTML preview: {html[:2000]}')
-    raise LoginError('Could not extract session ID from Duo Universal Prompt')
+    log(f'Found sid from URL: {sid[:20]}...')
+
+    # Extract xsrf token from cookie
+    xsrf_token = None
+    for cookie in session.cookies:
+        if cookie.name.startswith('_xsrf|'):
+            xsrf_token = cookie.value
+            log(f'Found xsrf token from cookie: {xsrf_token[:30]}...')
+            break
+
+    return _poll_duo_push(session, parsed.netloc, sid, xsrf_token)
 
 
-def _poll_duo_push(session, duo_host, sid):
-    """Shared logic for triggering and polling a Duo push."""
+def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
+    """Trigger Duo push and poll for approval. Supports v4 frameless API."""
+
+    # Build headers — v4 frameless requires xsrf token
+    api_headers = {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': f'https://{duo_host}',
+        'Referer': f'https://{duo_host}/frame/frameless/v4/auth',
+    }
+    if xsrf_token:
+        api_headers['X-Xsrftoken'] = xsrf_token
+
     # Trigger push
     prompt_url = f'https://{duo_host}/frame/prompt'
     log(f'Triggering Duo Push via {prompt_url}...')
@@ -566,15 +585,18 @@ def _poll_duo_push(session, duo_host, sid):
             'days_out_of_date': '',
             'days_to_block': 'None',
         },
-        headers={
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Accept': 'text/plain, */*; q=0.01',
-            'X-Requested-With': 'XMLHttpRequest',
-        },
+        headers=api_headers,
         timeout=30,
     )
 
-    prompt_result = resp.json()
+    log(f'Duo prompt response status: {resp.status_code}')
+    log(f'Duo prompt response body: {resp.text[:500]}')
+
+    try:
+        prompt_result = resp.json()
+    except Exception:
+        raise LoginError(f'Duo prompt returned non-JSON (status {resp.status_code}): {resp.text[:500]}')
+
     log(f'Duo prompt response: {prompt_result}')
 
     if prompt_result.get('stat') != 'OK':
@@ -594,15 +616,16 @@ def _poll_duo_push(session, duo_host, sid):
         resp = session.post(
             status_url,
             data={'sid': sid, 'txid': txid},
-            headers={
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'Accept': 'text/plain, */*; q=0.01',
-                'X-Requested-With': 'XMLHttpRequest',
-            },
+            headers=api_headers,
             timeout=30,
         )
 
-        status_result = resp.json()
+        try:
+            status_result = resp.json()
+        except Exception:
+            log(f'Duo status non-JSON (status {resp.status_code}): {resp.text[:300]}')
+            continue
+
         status_code = status_result.get('response', {}).get('status_code', '')
         status_msg = status_result.get('response', {}).get('status', '')
         log(f'Duo status: {status_code} — {status_msg}')
@@ -614,23 +637,30 @@ def _poll_duo_push(session, duo_host, sid):
                 resp = session.post(
                     f'https://{duo_host}{result_url}',
                     data={'sid': sid},
-                    headers={
-                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                        'Accept': 'text/plain, */*; q=0.01',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
+                    headers=api_headers,
                     timeout=30,
                 )
-                result_json = resp.json()
+                log(f'Duo result status: {resp.status_code}')
+                log(f'Duo result body: {resp.text[:500]}')
+
+                try:
+                    result_json = resp.json()
+                except Exception:
+                    # v4 might return HTML redirect instead of JSON
+                    log('Duo result returned non-JSON — checking for redirect')
+                    return {'type': 'redirect', 'response': resp}
+
                 auth_cookie = result_json.get('response', {}).get('cookie', '')
                 if auth_cookie:
                     return auth_cookie
 
-                # Universal prompt might have parent URL in the response
+                # v4 might return a parent redirect URL
                 parent = result_json.get('response', {}).get('parent', '')
                 if parent:
                     log(f'Duo redirect parent: {parent}')
                     return result_json['response']
+
+                return result_json
 
             raise LoginError(f'Unexpected Duo result: {status_result}')
 
@@ -668,21 +698,43 @@ def _post_duo_response(session, duo_info, auth_cookie):
         return resp
 
     elif duo_info['type'] == 'universal':
-        # Universal Prompt handles redirects differently
-        # The auth_cookie might be a dict with redirect info or a string
+        # Universal Prompt (v4 frameless) — Duo redirects back to CAS with a duo code.
+        # The auth_cookie could be: a string, a dict with parent/cookie, or a redirect response.
+        log(f'Duo Universal response type: {type(auth_cookie).__name__}')
+
         if isinstance(auth_cookie, dict):
-            parent = auth_cookie.get('parent', '')
-            if parent:
-                resp = session.get(parent, allow_redirects=True, timeout=30)
-                log(f'After Duo Universal redirect: {resp.url}')
+            # Check for a redirect response object
+            if auth_cookie.get('type') == 'redirect':
+                resp = auth_cookie['response']
+                log(f'Using Duo redirect response: {resp.url}')
                 return resp
 
-        # Try following the current page's redirect back
+            parent = auth_cookie.get('parent', '')
+            if parent:
+                log(f'Following Duo parent redirect: {parent}')
+                resp = session.get(parent, allow_redirects=True, timeout=30)
+                log(f'After Duo parent redirect: {resp.url}')
+                return resp
+
+            # Try the result_url if present
+            result_url = auth_cookie.get('result_url', '')
+            if result_url:
+                log(f'Following Duo result_url: {result_url}')
+                resp = session.get(result_url, allow_redirects=True, timeout=30)
+                log(f'After Duo result_url: {resp.url}')
+                return resp
+
+            log(f'Duo response dict keys: {list(auth_cookie.keys())}')
+            log(f'Duo response dict: {auth_cookie}')
+
+        # For v4 frameless, after approval Duo should redirect back to CAS
+        # via the redirect_uri in the original tx JWT.
+        # The redirect_uri was: https://sso.gatech.edu/cas/login
+        # with a duo_code parameter. Let's try following the Duo page again.
         log('Following redirects back from Duo Universal Prompt...')
-        # After approval, Duo redirects back to CAS with an auth code
-        # The session should handle this via cookies
         resp = session.get(duo_info['url'], allow_redirects=True, timeout=30)
         log(f'After revisiting Duo URL: {resp.url}')
+        log(f'Status: {resp.status_code}, body length: {len(resp.text)}')
         return resp
 
 

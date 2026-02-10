@@ -468,95 +468,84 @@ def _do_duo_iframe(session, duo_info):
 
 def _do_duo_universal(session, duo_info):
     """
-    Handle Universal Prompt (OIDC) Duo flow.
-    This is the newer flow where you're on a duosecurity.com page.
+    Handle Universal Prompt (v4 frameless) Duo flow.
+    The initial page is a preauth page with a plugin_form that must be
+    submitted first to initialize the Duo session, then we can trigger a push.
     """
     html = duo_info['html']
     current_url = duo_info['url']
     soup = BeautifulSoup(html, 'html.parser')
+    parsed = urlparse(current_url)
+    duo_host = parsed.netloc
 
     log(f'Duo Universal Prompt page: {current_url}')
     log(f'Page title: {_get_title(html)}')
 
-    # The Universal Prompt page is a full page (not iframe).
-    # We need to find the API endpoint and session info.
-    # Look for xsrf token and session data in the page.
+    # Step 1: Extract and submit the preauth plugin_form.
+    # This form collects browser info and initializes the Duo session.
+    # Without this, /frame/v4/prompt returns error 57.
+    plugin_form = soup.find('form', id='plugin_form')
+    if not plugin_form:
+        plugin_form = soup.find('form')
 
-    # Extract xsrf token from meta tag or cookie
-    xsrf_token = None
-    meta_xsrf = soup.find('meta', {'name': 'csrf-token'})
-    if meta_xsrf:
-        xsrf_token = meta_xsrf.get('content', '')
+    if plugin_form:
+        form_data = {}
+        for inp in plugin_form.find_all('input'):
+            name = inp.get('name')
+            if name:
+                form_data[name] = inp.get('value', '')
 
-    # Check cookies for xsrf
-    for cookie in session.cookies:
-        if 'xsrf' in cookie.name.lower() or cookie.name == 'has_trust_token':
-            log(f'Duo cookie: {cookie.name}={cookie.value[:50]}...')
+        # Fill in browser fingerprint fields
+        form_data['screen_resolution_width'] = '1920'
+        form_data['screen_resolution_height'] = '1080'
+        form_data['color_depth'] = '24'
+        form_data['is_cef_browser'] = 'false'
+        form_data['is_ipad_os'] = 'false'
+        form_data['is_ie_compatibility_mode'] = ''
+        form_data['is_user_verifying_platform_authenticator_available'] = 'false'
+        form_data['react_support'] = 'true'
 
-    # The Universal Prompt typically embeds JSON config in the page
-    # Look for it in script tags
-    config = None
-    for script in soup.find_all('script'):
-        text = script.string or ''
-        # Look for JSON config object
-        m = re.search(r'window\.__DUO_UNIVERSAL__\s*=\s*(\{.+?\});', text, re.DOTALL)
-        if m:
-            import json
-            config = json.loads(m.group(1))
-            log(f'Found Duo Universal config keys: {list(config.keys())}')
-            break
+        # Extract the clean xsrf token from the hidden field
+        xsrf_token = form_data.get('_xsrf', '')
+        log(f'Preauth xsrf token: {xsrf_token}')
+        log(f'Preauth form fields: {list(form_data.keys())}')
 
-    # The Universal Prompt uses a different API pattern.
-    # It typically shows a prompt page where we need to:
-    # 1. Find the "Send Me a Push" button / form
-    # 2. POST to trigger the push
-    # 3. Poll for completion
-    # 4. Follow the redirect back
+        # POST preauth form to the same URL (no action = same page)
+        preauth_url = current_url
+        log(f'Submitting preauth form to: {preauth_url}')
 
-    # Look for forms on the page
-    forms = soup.find_all('form')
-    for f in forms:
-        log(f'Form found: action={f.get("action")}, method={f.get("method")}')
+        resp = session.post(
+            preauth_url,
+            data=form_data,
+            allow_redirects=True,
+            timeout=30,
+        )
+        log(f'Preauth response: {resp.status_code}, url: {resp.url}')
+        log(f'Preauth body length: {len(resp.text)}')
+        log(f'Preauth body preview: {resp.text[:1000]}')
 
-    # For the Universal Prompt, the flow is typically:
-    # The page has API calls embedded that we need to replicate.
-    # Let's look for the Duo API base URL in the page.
+        # After preauth, we should get the prompt page with device options.
+        # The sid might have changed — extract from new URL or response.
+        new_parsed = urlparse(resp.url)
+        new_sid = parse_qs(new_parsed.query).get('sid', [None])
+        if new_sid and new_sid[0]:
+            sid = new_sid[0]
+        else:
+            sid = parse_qs(parsed.query).get('sid', [None])[0]
 
-    parsed = urlparse(current_url)
-    duo_base = f'{parsed.scheme}://{parsed.netloc}'
+        log(f'Using sid: {sid[:30]}...')
+    else:
+        sid = parse_qs(parsed.query).get('sid', [None])[0]
+        xsrf_token = None
+        for cookie in session.cookies:
+            if cookie.name.startswith('_xsrf'):
+                xsrf_token = cookie.value.strip('"')
+                break
 
-    # Try to find the healthcheck/auth endpoint
-    # Universal prompt typically uses /frame/v4/auth/prompt or similar
-    sid = parse_qs(parsed.query).get('sid', [None])[0]
     if not sid:
-        # Try fragment
-        if parsed.fragment:
-            sid = parse_qs(parsed.fragment).get('sid', [None])[0]
-
-    if not sid:
-        # Try fragment
-        m = re.search(r'"sid"\s*:\s*"([^"]+)"', html)
-        if m:
-            sid = m.group(1)
-
-    if not sid:
-        log(f'Universal Prompt page HTML preview: {html[:2000]}')
         raise LoginError('Could not extract session ID from Duo Universal Prompt')
 
-    log(f'Found sid from URL: {sid[:20]}...')
-
-    # Extract xsrf token from cookie — strip quotes if present
-    xsrf_token = None
-    for cookie in session.cookies:
-        if cookie.name.startswith('_xsrf'):
-            xsrf_token = cookie.value.strip('"')
-            log(f'Found xsrf token from cookie: {xsrf_token[:30]}...')
-            break
-
-    # Also log the full Duo page HTML so we can see what endpoints it uses
-    log(f'Duo page full HTML: {html}')
-
-    return _poll_duo_push(session, parsed.netloc, sid, xsrf_token)
+    return _poll_duo_push(session, duo_host, sid, xsrf_token)
 
 
 def _poll_duo_push(session, duo_host, sid, xsrf_token=None):

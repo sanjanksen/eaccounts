@@ -599,9 +599,15 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
         api_headers['X-Xsrftoken'] = xsrf_token
 
     log(f'Duo API headers: { {k: v[:50] if len(v) > 50 else v for k,v in api_headers.items()} }')
-    log(f'Duo session cookies: {[f"{c.name}={c.value[:30]}..." for c in session.cookies if "duo" in c.domain or "xsrf" in c.name.lower()]}')
 
-    # Trigger push — use /frame/prompt (what Duo's own page references)
+    # Step 1: Fetch healthcheck data — this initializes the session.
+    data_url = f'https://{duo_host}/frame/v4/preauth/healthcheck/data?sid={sid}'
+    log(f'Fetching healthcheck data from {data_url}...')
+    resp = session.get(data_url, headers=api_headers, timeout=30)
+    log(f'Healthcheck data response status: {resp.status_code}')
+    log(f'Healthcheck data response body: {resp.text[:2000]}')
+
+    # Step 2: Trigger push
     prompt_url = f'https://{duo_host}/frame/prompt'
     log(f'Triggering Duo Push via {prompt_url}...')
 

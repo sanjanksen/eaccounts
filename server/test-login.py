@@ -3,7 +3,9 @@
 import requests
 import sys
 
-BASE = "https://eaccounts-production.up.railway.app"
+import os
+BASE = os.environ.get("TEST_BASE", "http://localhost:5000")
+# Set TEST_BASE=https://eaccounts-production.up.railway.app to test Railway
 
 print("=== Testing POST /api/login ===")
 print("This will trigger a Duo push — approve on your phone!\n")

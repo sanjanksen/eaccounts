@@ -87,10 +87,30 @@ def playwright_login(username: str, password: str, timeout_ms: int = 90000) -> d
             log(f'Waiting for Duo approval (up to {timeout_ms // 1000}s)...')
             import time
             deadline = time.time() + timeout_ms / 1000
+            duo_code_logged = False
             while time.time() < deadline:
                 # Already redirected to eAccounts?
                 if _is_eaccounts(page.url):
                     break
+
+                # Try to read the Duo verification code from the page
+                if not duo_code_logged and 'duosecurity.com' in page.url:
+                    try:
+                        # Try known selectors for the Duo verification code
+                        code_el = page.query_selector('[data-testid="verification-code"], .verification-code, .duo-code, #auth-view-wrapper h2')
+                        if code_el:
+                            code_text = code_el.inner_text().strip()
+                            if code_text:
+                                log(f'========== DUO VERIFICATION CODE: {code_text} ==========')
+                                duo_code_logged = True
+                        else:
+                            # Fallback: log all visible large text on the page
+                            # (the code is usually displayed prominently)
+                            body_text = page.inner_text('body')
+                            log(f'Duo page text: {body_text[:500]}')
+                            duo_code_logged = True
+                    except Exception:
+                        pass
 
                 # Click through Duo interstitial buttons if they appear.
                 # Clicking may trigger a navigation (SAML redirect chain),

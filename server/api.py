@@ -2,7 +2,7 @@ import os
 import pickle
 from flask import Flask, jsonify, request
 from scraper import DiningBalanceScraper
-from login import perform_login, LoginError
+from playwright_login import playwright_login, LoginError
 
 app = Flask(__name__)
 
@@ -47,7 +47,7 @@ def login():
         return jsonify({'error': 'GT_USERNAME and GT_PASSWORD env vars must be set'}), 400
 
     try:
-        cookies = perform_login(username, password)
+        cookies = playwright_login(username, password)
 
         if not cookies:
             return jsonify({'error': 'Login completed but no cookies were returned'}), 500

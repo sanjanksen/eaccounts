@@ -9,6 +9,7 @@ Performs the full login chain:
   5. Return session cookies
 """
 
+import json
 import re
 import time
 import requests
@@ -548,80 +549,102 @@ def _do_duo_universal(session, duo_info):
         else:
             sid = parse_qs(parsed.query).get('sid', [None])[0]
 
-        # Get fresh xsrf token from cookies AFTER preauth
-        xsrf_token = None
+        # Get xsrf token from base-data (most reliable source)
+        xsrf_token = base_data.get('xsrf_token', '')
+        log(f'xsrf from base-data: {xsrf_token}')
+
+        # Build raw cookie header from the session's Set-Cookie responses.
+        # requests.Session may mangle cookie names with pipe characters like
+        # "sid|{uuid}" and "_xsrf|{uuid}", so we capture them from the
+        # response headers directly.
+        duo_cookies = {}
+        for r in [resp] + list(getattr(resp, 'history', [])):
+            for header_val in r.headers.get('Set-Cookie', '').split('\n'):
+                if not header_val:
+                    continue
+                # Also check raw headers for multiple Set-Cookie
+                pass
+        # Use response.cookies which has the parsed cookies from the last response chain
         for cookie in session.cookies:
-            if cookie.name.startswith('_xsrf'):
-                # Cookie value is base64-encoded; we need the raw token
-                import base64
-                try:
-                    raw = cookie.value.strip('"')
-                    # Try base64 decode — the raw hex token is what we need for the header
-                    decoded = base64.b64decode(raw).decode('utf-8')
-                    # The decoded value might have a timestamp appended with |
-                    if '|' in decoded:
-                        xsrf_token = decoded.split('|')[0]
-                    else:
-                        xsrf_token = decoded
-                    log(f'xsrf from cookie (decoded): {xsrf_token}')
-                except Exception:
-                    xsrf_token = raw
-                    log(f'xsrf from cookie (raw): {xsrf_token[:40]}...')
-                break
+            if 'duosecurity.com' in (cookie.domain or ''):
+                duo_cookies[cookie.name] = cookie.value
+                log(f'  Duo session cookie: {cookie.name} = {cookie.value[:50]}...')
+
+        # Also manually extract from raw response headers (in case requests mangled them)
+        log(f'Session cookie jar has {len(list(session.cookies))} total cookies')
+        for cookie in session.cookies:
+            log(f'  cookie jar: domain={cookie.domain} name={cookie.name}')
 
         log(f'Using sid: {sid[:30]}...')
     else:
         sid = parse_qs(parsed.query).get('sid', [None])[0]
         xsrf_token = None
-        for cookie in session.cookies:
-            if cookie.name.startswith('_xsrf'):
-                xsrf_token = cookie.value.strip('"')
-                break
+        duo_cookies = {}
 
     if not sid:
         raise LoginError('Could not extract session ID from Duo Universal Prompt')
 
-    return _poll_duo_push(session, duo_host, sid, xsrf_token)
+    return _poll_duo_push(session, duo_host, sid, xsrf_token, duo_cookies)
 
 
-def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
-    """Trigger Duo push and poll for approval. Supports v4 frameless API."""
+def _poll_duo_push(session, duo_host, sid, xsrf_token=None, duo_cookies=None):
+    """Trigger Duo push and poll for approval. Uses v4 frameless API."""
+
+    browser_features = json.dumps({
+        'touch_supported': False,
+        'platform_authenticator_status': 'available',
+        'webauthn_supported': True,
+        'screen_resolution_height': 915,
+        'screen_resolution_width': 1463,
+        'screen_color_depth': 24,
+        'is_uvpa_available': True,
+        'client_capabilities_uvpa': True,
+    })
+
+    # Build manual Cookie header — requests.Session can't handle pipe chars
+    # in cookie names like "sid|{uuid}" and "_xsrf|{uuid}"
+    cookie_header = '; '.join(f'{k}={v}' for k, v in (duo_cookies or {}).items())
+    log(f'Manual Duo cookie header: {cookie_header[:200]}...')
 
     # Build headers — v4 frameless requires xsrf token
     api_headers = {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'Accept': '*/*',
         'Origin': f'https://{duo_host}',
-        'Referer': f'https://{duo_host}/frame/v4/preauth/healthcheck?sid={sid}',
+        'Referer': f'https://{duo_host}/frame/v4/auth/prompt?sid={sid}',
     }
     if xsrf_token:
         api_headers['X-Xsrftoken'] = xsrf_token
+    if cookie_header:
+        api_headers['Cookie'] = cookie_header
 
-    log(f'Duo API headers: { {k: v[:50] if len(v) > 50 else v for k,v in api_headers.items()} }')
+    log(f'Duo API headers: { {k: (v[:50] + "...") if len(str(v)) > 50 else v for k,v in api_headers.items()} }')
 
-    # Step 1: Fetch healthcheck data — this initializes the session.
-    data_url = f'https://{duo_host}/frame/v4/preauth/healthcheck/data?sid={sid}'
-    log(f'Fetching healthcheck data from {data_url}...')
-    resp = session.get(data_url, headers=api_headers, timeout=30)
-    log(f'Healthcheck data response status: {resp.status_code}')
-    log(f'Healthcheck data response body: {resp.text[:2000]}')
+    # Step 1: GET /frame/v4/auth/prompt/data — initializes the session
+    data_url = f'https://{duo_host}/frame/v4/auth/prompt/data'
+    data_params = {
+        'post_auth_action': 'OIDC_EXIT',
+        'browser_features': browser_features,
+        'sid': sid,
+    }
+    log(f'Fetching auth prompt data from {data_url}...')
+    resp = requests.get(data_url, params=data_params, headers={**BROWSER_HEADERS, **api_headers}, timeout=30)
+    log(f'Auth prompt data response status: {resp.status_code}')
+    log(f'Auth prompt data response body: {resp.text[:2000]}')
 
-    # Step 2: Trigger push
-    prompt_url = f'https://{duo_host}/frame/prompt'
+    # Step 2: POST /frame/v4/prompt — trigger push
+    prompt_url = f'https://{duo_host}/frame/v4/prompt'
     log(f'Triggering Duo Push via {prompt_url}...')
 
     prompt_data = {
-        'sid': sid,
-        'factor': 'Duo Push',
         'device': 'phone1',
+        'factor': 'Duo Push',
         'postAuthDestination': 'OIDC_EXIT',
-        'out_of_date': '',
-        'days_out_of_date': '',
-        'days_to_block': 'None',
+        'browser_features': browser_features,
+        'sid': sid,
     }
 
-    resp = session.post(prompt_url, data=prompt_data, headers=api_headers, timeout=30)
+    resp = requests.post(prompt_url, data=prompt_data, headers={**BROWSER_HEADERS, **api_headers}, timeout=30)
     log(f'Duo prompt response status: {resp.status_code}')
     log(f'Duo prompt response body: {resp.text[:500]}')
 
@@ -639,17 +662,17 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
     log(f'Duo txid: {txid}')
     log('Waiting for Duo push approval (check your phone)...')
 
-    # Poll
-    status_url = f'https://{duo_host}/frame/status'
+    # Step 3: POST /frame/v4/status — poll for approval
+    status_url = f'https://{duo_host}/frame/v4/status'
     start_time = time.time()
 
     while time.time() - start_time < DUO_POLL_TIMEOUT:
         time.sleep(DUO_POLL_INTERVAL)
 
-        resp = session.post(
+        resp = requests.post(
             status_url,
-            data={'sid': sid, 'txid': txid},
-            headers=api_headers,
+            data={'txid': txid, 'sid': sid},
+            headers={**BROWSER_HEADERS, **api_headers},
             timeout=30,
         )
 
@@ -667,10 +690,10 @@ def _poll_duo_push(session, duo_host, sid, xsrf_token=None):
             log('Duo push approved!')
             result_url = status_result['response'].get('result_url', '')
             if result_url:
-                resp = session.post(
+                resp = requests.post(
                     f'https://{duo_host}{result_url}',
                     data={'sid': sid},
-                    headers=api_headers,
+                    headers={**BROWSER_HEADERS, **api_headers},
                     timeout=30,
                 )
                 log(f'Duo result status: {resp.status_code}')

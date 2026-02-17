@@ -4,7 +4,10 @@
       "Bash(dir:*)",
       "Bash(cmd /c \"dir /s /b C:\\\\Users\\\\sanja\\\\Documents\\\\Nerd\\\\eaccounts\\\\server\")",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "WebSearch"
     ]
   }
 }

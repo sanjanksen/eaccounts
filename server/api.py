@@ -1,10 +1,36 @@
 import os
 import pickle
+import time
+import threading
+from datetime import datetime
 from flask import Flask, jsonify, request
 from scraper import DiningBalanceScraper
 from playwright_login import playwright_login, LoginError
 
 app = Flask(__name__)
+
+KEEPALIVE_INTERVAL = 900  # 15 minutes
+
+
+def keepalive_loop():
+    print(f'[{datetime.now()}] Keep-alive thread starting...')
+    while True:
+        time.sleep(KEEPALIVE_INTERVAL)
+        try:
+            scraper = DiningBalanceScraper()
+            print(f'[{datetime.now()}] Keep-alive: refreshing session...')
+            result = scraper.get_balance()
+
+            if result.get('error') == 'session_expired':
+                print(f'[{datetime.now()}] Keep-alive: SESSION EXPIRED')
+            elif result.get('status') == 'success':
+                print(f'[{datetime.now()}] Keep-alive: session refreshed')
+                for a in result['accounts']:
+                    print(f'  {a["name"]}: {a["balance"]}')
+            else:
+                print(f'[{datetime.now()}] Keep-alive error: {result.get("error")}')
+        except Exception as e:
+            print(f'[{datetime.now()}] Keep-alive error: {e}')
 
 
 @app.route('/api/balance', methods=['GET'])
@@ -76,5 +102,6 @@ def health():
 
 
 if __name__ == '__main__':
+    threading.Thread(target=keepalive_loop, daemon=True).start()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)

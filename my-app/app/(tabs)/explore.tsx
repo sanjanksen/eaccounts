@@ -1,112 +1,134 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React from 'react';
+import {
+  View,
+  Text,
+  FlatList,
+  StyleSheet,
+  ActivityIndicator,
+  RefreshControl,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Theme } from '@/constants/theme';
+import { useData } from '@/contexts/DataContext';
+import { AccountList } from '@/components/AccountList';
+import { TransactionItem } from '@/components/TransactionItem';
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+export default function ActivityScreen() {
+  const insets = useSafeAreaInsets();
+  const { accounts, transactions, loading, refreshing, error, refresh } = useData();
 
-export default function TabTwoScreen() {
+  if (loading) {
+    return (
+      <View style={[styles.centered, { paddingTop: insets.top }]}>
+        <ActivityIndicator size="large" color={Theme.colors.primary} />
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={[styles.centered, { paddingTop: insets.top }]}>
+        <Text style={styles.errorText}>{error}</Text>
+      </View>
+    );
+  }
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
-        </ThemedText>
-      </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
-    </ParallaxScrollView>
+    <View style={[styles.screen, { paddingTop: insets.top }]}>
+      <FlatList
+        data={transactions}
+        keyExtractor={(_, index) => index.toString()}
+        renderItem={({ item }) => (
+          <View style={styles.itemWrapper}>
+            <TransactionItem transaction={item} />
+          </View>
+        )}
+        ItemSeparatorComponent={() => <View style={styles.separator} />}
+        ListHeaderComponent={
+          <View>
+            <View style={styles.header}>
+              <Text style={styles.title}>Activity</Text>
+            </View>
+            <AccountList accounts={accounts} />
+            <Text style={styles.sectionTitle}>All Transactions</Text>
+            <View style={styles.listCardTop} />
+          </View>
+        }
+        ListFooterComponent={<View style={styles.listCardBottom} />}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refresh}
+            tintColor={Theme.colors.primary}
+          />
+        }
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
-    position: 'absolute',
+  screen: {
+    flex: 1,
+    backgroundColor: Theme.colors.background,
   },
-  titleContainer: {
-    flexDirection: 'row',
-    gap: 8,
+  centered: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: Theme.colors.background,
+  },
+  errorText: {
+    color: Theme.colors.danger,
+    fontSize: Theme.fontSize.md,
+  },
+  header: {
+    paddingHorizontal: Theme.spacing.md,
+    paddingTop: Theme.spacing.md,
+    paddingBottom: Theme.spacing.md,
+  },
+  title: {
+    fontSize: Theme.fontSize.xxl,
+    fontWeight: '800',
+    color: Theme.colors.text,
+  },
+  sectionTitle: {
+    fontSize: Theme.fontSize.lg,
+    fontWeight: '700',
+    color: Theme.colors.text,
+    paddingHorizontal: Theme.spacing.md,
+    marginBottom: Theme.spacing.sm,
+  },
+  listCardTop: {
+    backgroundColor: Theme.colors.surface,
+    borderTopLeftRadius: Theme.radius.lg,
+    borderTopRightRadius: Theme.radius.lg,
+    height: 4,
+    marginHorizontal: Theme.spacing.md,
+  },
+  listCardBottom: {
+    backgroundColor: Theme.colors.surface,
+    borderBottomLeftRadius: Theme.radius.lg,
+    borderBottomRightRadius: Theme.radius.lg,
+    height: 16,
+    marginHorizontal: Theme.spacing.md,
+    marginBottom: 40,
+  },
+  itemWrapper: {
+    backgroundColor: Theme.colors.surface,
+    paddingHorizontal: Theme.spacing.md,
+    marginHorizontal: Theme.spacing.md,
+  },
+  separator: {
+    height: 1,
+    backgroundColor: Theme.colors.border,
+    marginLeft: 60,
+    marginRight: Theme.spacing.md,
+    marginHorizontal: Theme.spacing.md,
+  },
+  listContent: {
+    paddingBottom: 20,
   },
 });

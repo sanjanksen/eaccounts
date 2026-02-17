@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -6,78 +6,29 @@ import {
   StyleSheet,
   ActivityIndicator,
   RefreshControl,
+  Pressable,
 } from 'react-native';
-import { StatusBar } from 'expo-status-bar';
+import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Theme } from '@/constants/theme';
-import {
-  ParsedAccount,
-  ParsedTransaction,
-  parseAccounts,
-  parseTransactions,
-  calculateTotalBalance,
-  calculateWeeklySpending,
-} from '@/utils/finance';
+import { useData } from '@/contexts/DataContext';
 import { BalanceSummary } from '@/components/BalanceSummary';
-import { AccountList } from '@/components/AccountList';
-import { TransactionList } from '@/components/TransactionList';
-
-const BASE_URL = 'https://eaccounts-production.up.railway.app';
+import { SpendingChart } from '@/components/SpendingChart';
+import { TransactionItem } from '@/components/TransactionItem';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
-  const [accounts, setAccounts] = useState<ParsedAccount[]>([]);
-  const [transactions, setTransactions] = useState<ParsedTransaction[]>([]);
-  const [totalBalance, setTotalBalance] = useState(0);
-  const [weeklySpending, setWeeklySpending] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchData = useCallback(async () => {
-    try {
-      setError(null);
-
-      const [balanceRes, transactionsRes] = await Promise.all([
-        fetch(`${BASE_URL}/api/balance`),
-        fetch(`${BASE_URL}/api/transactions`),
-      ]);
-
-      const balanceData = await balanceRes.json();
-      const transactionsData = await transactionsRes.json();
-
-      if (balanceData.error) {
-        setError(balanceData.error);
-        return;
-      }
-      if (transactionsData.error) {
-        setError(transactionsData.error);
-        return;
-      }
-
-      const parsedAccounts = parseAccounts(balanceData.accounts || []);
-      const parsedTransactions = parseTransactions(transactionsData.transactions || []);
-
-      setAccounts(parsedAccounts);
-      setTransactions(parsedTransactions);
-      setTotalBalance(calculateTotalBalance(parsedAccounts));
-      setWeeklySpending(calculateWeeklySpending(parsedTransactions));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load data');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
-
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    fetchData();
-  }, [fetchData]);
+  const router = useRouter();
+  const {
+    transactions,
+    totalBalance,
+    weeklySpending,
+    dailySpending,
+    loading,
+    refreshing,
+    error,
+    refresh,
+  } = useData();
 
   if (loading) {
     return (
@@ -95,17 +46,18 @@ export default function HomeScreen() {
           <Text style={styles.errorIcon}>!</Text>
           <Text style={styles.errorTitle}>Unable to Load</Text>
           <Text style={styles.errorMessage}>{error}</Text>
-          <Text style={styles.retryButton} onPress={fetchData}>
-            Tap to retry
-          </Text>
+          <Pressable onPress={refresh}>
+            <Text style={styles.retryButton}>Tap to retry</Text>
+          </Pressable>
         </View>
       </View>
     );
   }
 
+  const recentTransactions = transactions.slice(0, 5);
+
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar style="dark" />
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
@@ -113,7 +65,7 @@ export default function HomeScreen() {
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={onRefresh}
+            onRefresh={refresh}
             tintColor={Theme.colors.primary}
           />
         }
@@ -129,14 +81,24 @@ export default function HomeScreen() {
           </Text>
         </View>
 
-        <BalanceSummary
-          totalBalance={totalBalance}
-          weeklySpending={weeklySpending}
-        />
+        <BalanceSummary totalBalance={totalBalance} weeklySpending={weeklySpending} />
 
-        <AccountList accounts={accounts} />
+        <SpendingChart data={dailySpending} />
 
-        <TransactionList transactions={transactions} />
+        <View style={styles.recentHeader}>
+          <Text style={styles.sectionTitle}>Recent</Text>
+          <Pressable onPress={() => router.push('/explore')}>
+            <Text style={styles.seeAll}>See all</Text>
+          </Pressable>
+        </View>
+        <View style={styles.recentCard}>
+          {recentTransactions.map((t, i) => (
+            <React.Fragment key={i}>
+              <TransactionItem transaction={t} />
+              {i < recentTransactions.length - 1 && <View style={styles.separator} />}
+            </React.Fragment>
+          ))}
+        </View>
       </ScrollView>
     </View>
   );
@@ -169,6 +131,34 @@ const styles = StyleSheet.create({
     color: Theme.colors.textSecondary,
     marginTop: 2,
   },
+  recentHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: Theme.spacing.md,
+    marginBottom: Theme.spacing.sm,
+  },
+  sectionTitle: {
+    fontSize: Theme.fontSize.lg,
+    fontWeight: '700',
+    color: Theme.colors.text,
+  },
+  seeAll: {
+    fontSize: Theme.fontSize.sm,
+    fontWeight: '600',
+    color: Theme.colors.primary,
+  },
+  recentCard: {
+    backgroundColor: Theme.colors.surface,
+    borderRadius: Theme.radius.lg,
+    padding: Theme.spacing.md,
+    marginHorizontal: Theme.spacing.md,
+  },
+  separator: {
+    height: 1,
+    backgroundColor: Theme.colors.border,
+    marginLeft: 44,
+  },
   centered: {
     flex: 1,
     justifyContent: 'center',
@@ -194,7 +184,7 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: '#FEE2E2',
+    backgroundColor: '#2e1a1a',
     color: Theme.colors.danger,
     fontSize: Theme.fontSize.xl,
     fontWeight: '700',

@@ -73,19 +73,23 @@ def login():
         return jsonify({'error': 'GT_USERNAME and GT_PASSWORD env vars must be set'}), 400
 
     try:
-        cookies = playwright_login(username, password)
+        eaccounts_cookies, all_cookies = playwright_login(username, password)
 
-        if not cookies:
+        if not eaccounts_cookies:
             return jsonify({'error': 'Login completed but no cookies were returned'}), 500
 
-        # Save cookies to cookies.pkl (same format the scraper expects)
+        # Save eAccounts cookies to cookies.pkl (same format the scraper expects)
         with open('cookies.pkl', 'wb') as f:
-            pickle.dump(cookies, f)
+            pickle.dump(eaccounts_cookies, f)
+
+        # Save all cookies (SSO, Duo, eAccounts) for SAML session refresh
+        with open('sso_cookies.pkl', 'wb') as f:
+            pickle.dump(all_cookies, f)
 
         return jsonify({
             'status': 'success',
-            'message': f'Login successful — {len(cookies)} cookies saved',
-            'cookies_count': len(cookies),
+            'message': f'Login successful — {len(eaccounts_cookies)} eAccounts + {len(all_cookies)} total cookies saved',
+            'cookies_count': len(eaccounts_cookies),
         })
 
     except LoginError as e:

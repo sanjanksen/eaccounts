@@ -28,7 +28,7 @@ def _is_eaccounts(url):
     return 'transactcampus.com' in urlparse(url).netloc
 
 
-def playwright_login(username: str, password: str, timeout_ms: int = 90000) -> dict:
+def playwright_login(username: str, password: str, timeout_ms: int = 90000) -> tuple:
     """
     Perform full GT SSO + Duo login using a headless browser.
 
@@ -38,7 +38,9 @@ def playwright_login(username: str, password: str, timeout_ms: int = 90000) -> d
         timeout_ms: Max time in ms to wait for Duo approval (default 90s)
 
     Returns:
-        dict of {cookie_name: cookie_value} for eAccounts domain
+        (eaccounts_cookies, all_cookies) where:
+        - eaccounts_cookies: {name: value} for transactcampus.com only
+        - all_cookies: [{name, value, domain, path}, ...] for all domains
 
     Raises:
         LoginError on any failure
@@ -152,19 +154,32 @@ def playwright_login(username: str, password: str, timeout_ms: int = 90000) -> d
             browser.close()
 
 
-def _extract_cookies(context) -> dict:
-    """Extract eAccounts cookies from the browser context."""
-    all_cookies = context.cookies()
-    cookies = {}
-    for c in all_cookies:
+def _extract_cookies(context) -> tuple:
+    """Extract cookies from the browser context.
+
+    Returns:
+        (eaccounts_cookies, all_cookies) where:
+        - eaccounts_cookies: {name: value} for transactcampus.com only
+        - all_cookies: [{name, value, domain, path}, ...] for everything (SSO, Duo, eAccounts)
+    """
+    browser_cookies = context.cookies()
+    eaccounts_cookies = {}
+    all_cookies = []
+    for c in browser_cookies:
+        all_cookies.append({
+            'name': c['name'],
+            'value': c['value'],
+            'domain': c['domain'],
+            'path': c.get('path', '/'),
+        })
         if 'transactcampus.com' in c['domain']:
-            cookies[c['name']] = c['value']
+            eaccounts_cookies[c['name']] = c['value']
             log(f'Cookie: {c["name"]} = {c["value"][:50]}...')
 
-    if not cookies:
+    if not eaccounts_cookies:
         log('No transactcampus.com cookies found. All cookies:')
-        for c in all_cookies:
+        for c in browser_cookies:
             log(f'  {c["domain"]} / {c["name"]}')
 
-    log(f'Extracted {len(cookies)} eAccounts cookies')
-    return cookies
+    log(f'Extracted {len(eaccounts_cookies)} eAccounts cookies, {len(all_cookies)} total cookies')
+    return eaccounts_cookies, all_cookies

@@ -23,7 +23,6 @@ function formatDate(date: Date): string {
 }
 
 function cleanLocation(location: string): string {
-  // Shorten long location names
   const parts = location.split(' ');
   if (parts.length > 4) {
     return parts.slice(0, 4).join(' ');
@@ -75,10 +74,10 @@ const styles = StyleSheet.create({
     marginRight: Theme.spacing.sm,
   },
   iconDebit: {
-    backgroundColor: '#FEE2E2',
+    backgroundColor: '#2e1a1a',
   },
   iconCredit: {
-    backgroundColor: '#D1FAE5',
+    backgroundColor: '#1a2e1f',
   },
   iconText: {
     fontSize: Theme.fontSize.lg,

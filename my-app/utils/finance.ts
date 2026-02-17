@@ -112,3 +112,34 @@ export function calculateTotalBalance(accounts: ParsedAccount[]): number {
     return total;
   }, 0);
 }
+
+export interface DailySpending {
+  label: string;
+  amount: number;
+}
+
+/**
+ * Returns 7-day array of daily debit totals (most recent last).
+ */
+export function getDailySpending(transactions: ParsedTransaction[]): DailySpending[] {
+  const days: DailySpending[] = [];
+  const now = new Date();
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  for (let i = 6; i >= 0; i--) {
+    const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+    const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+    const total = transactions.reduce((sum, t) => {
+      if (t.amount < 0 && t.date >= dayStart && t.date < dayEnd) {
+        return sum + Math.abs(t.amount);
+      }
+      return sum;
+    }, 0);
+
+    days.push({ label: dayNames[date.getDay()], amount: total });
+  }
+
+  return days;
+}

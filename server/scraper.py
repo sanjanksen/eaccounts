@@ -6,6 +6,7 @@ import json
 import base64
 from datetime import datetime
 from bs4 import BeautifulSoup
+from login import _find_saml_request_form, _find_saml_form, _complete_saml_flow
 
 BASE_URL = 'https://eacct-buzzcard-sp.transactcampus.com/buzzcard'
 
@@ -28,6 +29,7 @@ class SessionExpiredError(Exception):
 class DiningBalanceScraper:
     def __init__(self):
         self.cookies_file = 'cookies.pkl'
+        self.sso_cookies_file = 'sso_cookies.pkl'
         self.cookie_dict = {}  # plain {name: value} dict
         self.load_cookies()
 
@@ -99,6 +101,114 @@ class DiningBalanceScraper:
             pickle.dump(self.cookie_dict, f)
         log(f'Saved {len(self.cookie_dict)} cookies to {self.cookies_file}')
 
+    def _refresh_via_saml(self, saml_html):
+        """Attempt to refresh eAccounts session by following the SAML redirect chain
+        using saved SSO/Duo cookies (no Duo push needed if SSO session is still valid).
+
+        Returns True on success, raises SessionExpiredError if SSO cookies are also expired.
+        """
+        log('Attempting SAML session refresh...')
+
+        # Load all saved cookies (SSO, Duo, eAccounts)
+        if not os.path.exists(self.sso_cookies_file):
+            log('No sso_cookies.pkl found — cannot refresh via SAML')
+            raise SessionExpiredError('Session expired (no SSO cookies saved)')
+
+        try:
+            with open(self.sso_cookies_file, 'rb') as f:
+                all_cookies = pickle.load(f)
+            log(f'Loaded {len(all_cookies)} SSO cookies from {self.sso_cookies_file}')
+        except Exception as e:
+            log(f'Failed to load SSO cookies: {e}')
+            raise SessionExpiredError('Session expired (failed to load SSO cookies)')
+
+        # Create a requests.Session and load all cookies with proper domains
+        session = requests.Session()
+        session.headers.update(BROWSER_HEADERS)
+        for c in all_cookies:
+            domain = c['domain']
+            # Strip leading dot for requests compatibility
+            if domain.startswith('.'):
+                domain = domain[1:]
+            session.cookies.set(
+                c['name'], c['value'],
+                domain=domain, path=c.get('path', '/'),
+            )
+
+        # Parse the SAML form from the HTML (SAMLRequest form from eAccounts -> IdP)
+        saml_request_form = _find_saml_request_form(saml_html)
+        if not saml_request_form:
+            log('No SAML request form found in HTML')
+            raise SessionExpiredError('Session expired (no SAML form in response)')
+
+        log(f'SAML request form action: {saml_request_form["action"]}')
+
+        try:
+            # POST the SAMLRequest to the IdP
+            resp = session.post(
+                saml_request_form['action'],
+                data=saml_request_form['fields'],
+                allow_redirects=True,
+                timeout=30,
+            )
+            log(f'After SAML request POST: {resp.url} (status {resp.status_code})')
+
+            # Check if IdP returned a SAML response form (SSO cookies still valid)
+            saml_form = _find_saml_form(resp.text)
+            if saml_form:
+                log('IdP returned SAML assertion — SSO session is valid!')
+                cookies = _complete_saml_flow(session, saml_form, resp.url)
+                if cookies:
+                    self.cookie_dict = cookies
+                    self.save_cookies()
+                    # Update SSO cookies with any refreshed values
+                    self._save_sso_cookies(session)
+                    log(f'SAML refresh successful — {len(cookies)} fresh eAccounts cookies')
+                    return True
+
+            # Check if we ended up on eAccounts directly (cookies already set via redirects)
+            if 'transactcampus.com' in resp.url:
+                cookies = {}
+                for cookie in session.cookies:
+                    if 'transactcampus.com' in (cookie.domain or ''):
+                        cookies[cookie.name] = cookie.value
+                if cookies:
+                    self.cookie_dict = cookies
+                    self.save_cookies()
+                    self._save_sso_cookies(session)
+                    log(f'SAML refresh successful (direct) — {len(cookies)} fresh eAccounts cookies')
+                    return True
+
+            # If we landed on a login page, SSO cookies are also expired
+            if 'login' in resp.url.lower() or 'cas' in resp.url.lower():
+                log(f'SSO cookies expired — landed on login page: {resp.url}')
+                raise SessionExpiredError('Session expired (SSO cookies also expired)')
+
+            log(f'SAML refresh ended at unexpected URL: {resp.url}')
+            raise SessionExpiredError('Session expired (SAML refresh failed)')
+
+        except SessionExpiredError:
+            raise
+        except Exception as e:
+            log(f'SAML refresh error: {e}')
+            import traceback
+            traceback.print_exc()
+            raise SessionExpiredError(f'Session expired (SAML refresh error: {e})')
+
+    def _save_sso_cookies(self, session):
+        """Save all cookies from a requests.Session to sso_cookies.pkl."""
+        all_cookies = []
+        for cookie in session.cookies:
+            all_cookies.append({
+                'name': cookie.name,
+                'value': cookie.value,
+                'domain': cookie.domain or '',
+                'path': cookie.path or '/',
+            })
+        with open(self.sso_cookies_file, 'wb') as f:
+            pickle.dump(all_cookies, f)
+        log(f'Saved {len(all_cookies)} SSO cookies to {self.sso_cookies_file}')
+
     def _update_cookies_from_response(self, response):
         """Update cookie dict from Set-Cookie response headers."""
         new_cookies = list(response.cookies)
@@ -139,6 +249,26 @@ class DiningBalanceScraper:
             log(f'Page title: {title_match.group(1)}')
         else:
             log(f'No <title> found, body preview: {response.text[:200]}')
+
+        # Detect SAML redirect pages (200 with auto-submit form to SSO/IDP)
+        if 'document.forms.theform.submit()' in response.text and 'idp' in response.text.lower():
+            log('SAML redirect page detected — attempting auto-refresh via SSO cookies')
+            self._refresh_via_saml(response.text)
+            # Retry the original request with fresh cookies
+            log(f'Retrying GET {url} with refreshed cookies...')
+            response = requests.get(
+                url,
+                headers={**BROWSER_HEADERS, 'Cookie': self._cookie_header()},
+                timeout=30,
+                allow_redirects=False,
+            )
+            log(f'Retry response: {response.status_code}, body length: {len(response.text)} chars')
+            # If it's still a SAML redirect after refresh, give up
+            if 'document.forms.theform.submit()' in response.text and 'idp' in response.text.lower():
+                log('SAML redirect again after refresh — session expired')
+                raise SessionExpiredError('Session expired (SAML redirect after refresh)')
+            if response.status_code != 200:
+                raise Exception(f'Unexpected status after refresh: {response.status_code}')
 
         self._update_cookies_from_response(response)
         self.save_cookies()
